@@ -1,0 +1,5 @@
+As GITHUB doesn't suuport videos greater than 25 mb .. I have included the Input and as well as one Output video of Video Analysis of a match between MANCHESTER UNITED AND BRIGHTON :
+It consists of the analysis of the game as well as one mini map video of it 
+More modifications are yet to be done inside this project 
+This is just a prototype 
+LINK : https://drive.google.com/drive/folders/1i-Sq6ur5jyRFSPhwPAi_Wqak_pOhVi5r?usp=drive_link
