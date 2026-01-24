@@ -1,0 +1,312 @@
+Phase 3 :
+
+pipeline.py :
+# src/pipeline/pipeline.py
+
+import os
+import json
+import cv2
+
+from src.utils.video_loader import load_video
+from src.detection.yolo_detector import YOLODetector
+from src.utils.logger import log
+from src.utils.config import config
+from src.utils.helpers import ensure_dir
+from src.tracking.tracker import SimpleTracker
+from src.analytics.team_classifier import TeamClassifier
+from src.visualization.player_marker import draw_player_marker
+
+
+class Pipeline:
+    def __init__(self, video_path: str):
+        log("Initializing Pipeline ::")
+        self.video_path = video_path
+
+        # Load video + metadata
+        self.cap, self.metadata = load_video(video_path)
+
+        # YOLOv8 (we use the model directly)
+        self.detector = YOLODetector()
+
+        # Simple centroid-based tracker
+        self.tracker = SimpleTracker(max_distance=60.0)
+
+        # Color-based team classifier
+        self.team_classifier = TeamClassifier()
+
+        # Ensure output folders
+        ensure_dir(config.OUTPUT_VIDEOS)
+        ensure_dir(config.TRACKING_LOGS_DIR)
+
+    def _is_on_pitch(self, frame, box):
+        """
+        Heuristic filter to avoid crowd / tiny detections.
+        Returns True if this bbox looks like a real player on the pitch.
+        """
+        h_frame, _ = frame.shape[:2]
+        x1, y1, x2, y2 = map(int, box)
+        h = y2 - y1
+
+        # Too small -> probably crowd / noise
+        if h < 0.06 * h_frame:
+            return False
+
+        # Very high up in image -> likely stands
+        if y2 < 0.25 * h_frame:
+            return False
+
+        return True
+
+    def process_video(self):
+        log("Processing video frame-by-frame ::")
+        frame_idx = 0
+        tracking_log = {}
+
+        output_path = os.path.join(
+            config.OUTPUT_VIDEOS,
+            f"processed_{os.path.basename(self.video_path)}",
+        )
+
+        fourcc = cv2.VideoWriter_fourcc(*"mp4v")
+        fps = self.metadata["fps"] if self.metadata["fps"] > 0 else 25.0
+        out = cv2.VideoWriter(
+            output_path,
+            fourcc,
+            fps,
+            (self.metadata["width"], self.metadata["height"]),
+        )
+
+        while True:
+            ret, frame = self.cap.read()
+            if not ret:
+                break
+
+            # --- YOLO Detection ---
+            results = self.detector.model(frame)[0]
+            detections = []
+
+            if results.boxes is not None and len(results.boxes) > 0:
+                for box in results.boxes.data:
+                    x1, y1, x2, y2, score, cls_id = box.tolist()
+
+                    # only 'person' class
+                    if int(cls_id) != 0 or score < 0.35:
+                        continue
+
+                    bbox = (x1, y1, x2, y2)
+
+                    # Filter out crowd / too small / too high
+                    if not self._is_on_pitch(frame, bbox):
+                        continue
+
+                    detections.append(bbox)
+
+            # --- Tracking ---
+            tracks = self.tracker.update(detections, frame_idx)
+            # tracks: List[(track_id, (x1, y1, x2, y2))]
+
+            for track_id, box in tracks:
+                # Team classification based on jersey colors
+                team = self.team_classifier.classify(frame, box)
+
+                # Ignore referee / crowd / unknown
+                if team not in ("A", "B"):
+                    continue
+
+                # Draw clean box + label
+                draw_player_marker(frame, team, box)
+
+                # Optional: log for analytics
+                if track_id not in tracking_log:
+                    tracking_log[track_id] = {"team": team, "history": []}
+                x1, y1, x2, y2 = map(int, box)
+                tracking_log[track_id]["history"].append(
+                    [frame_idx, x1, y1, x2, y2]
+                )
+
+            out.write(frame)
+            frame_idx += 1
+
+            if frame_idx % 50 == 0:
+                log(f"Processed {frame_idx} frames...")
+
+        self.cap.release()
+        out.release()
+
+        # Save tracking log
+        if config.SAVE_TRACKING_LOGS:
+            log_path = os.path.join(config.TRACKING_LOGS_DIR, "tracking_log.json")
+            with open(log_path, "w") as f:
+                json.dump(tracking_log, f, indent=4)
+            log(f"Tracking data saved → {log_path}")
+
+        log(f"✅ Output saved → {output_path}")
+
+player_tracker.py :
+
+# src/visualization/player_marker.py
+
+import cv2
+from typing import Tuple
+
+# BGR colors
+COLOR_TEAM_A = (0, 0, 255)   # Red
+COLOR_TEAM_B = (255, 0, 0)   # Blue
+
+
+def draw_player_marker(frame, team: str, box: Tuple[float, float, float, float]):
+    """
+    Draw a clean box + single-letter label for a player.
+
+    team: "A" or "B"
+    box: (x1, y1, x2, y2) in image coordinates
+    """
+    x1, y1, x2, y2 = map(int, box)
+
+    if team == "A":
+        color = COLOR_TEAM_A
+        label = "A"
+    else:
+        color = COLOR_TEAM_B
+        label = "B"
+
+    # Smooth rectangle
+    cv2.rectangle(frame, (x1, y1), (x2, y2), color, 2, cv2.LINE_AA)
+
+    # Label background
+    font = cv2.FONT_HERSHEY_SIMPLEX
+    scale = 0.6
+    thickness = 2
+    (tw, th), _ = cv2.getTextSize(label, font, scale, thickness)
+    label_x = x1
+    label_y = max(y1 - 5, th + 2)
+
+    cv2.rectangle(
+        frame,
+        (label_x, label_y - th - 4),
+        (label_x + tw + 4, label_y + 2),
+        color,
+        thickness=-1,
+    )
+
+    cv2.putText(
+        frame,
+        label,
+        (label_x + 2, label_y - 2),
+        font,
+        scale,
+        (255, 255, 255),
+        thickness,
+        cv2.LINE_AA,
+    )
+
+team_classifier.py :
+
+# src/analytics/team_classifier.py
+
+import cv2
+import numpy as np
+from typing import Tuple, Optional
+
+
+class TeamClassifier:
+    """
+    Very simple, robust color-based team classifier.
+
+    - Looks only at the TORSO area of the bounding box (ignore grass, shorts).
+    - Uses HSV color masks for:
+        * Red jerseys  -> Team A
+        * Blue jerseys -> Team B
+        * Yellow (referee) -> ignored
+    - Returns: "A", "B" or None (ignore / unknown).
+    """
+
+    def __init__(self) -> None:
+        # HSV ranges tuned for broadcast footage (you can tweak later)
+        # Red jersey (Manchester United)
+        self.red_lower1 = np.array([0, 80, 60], dtype=np.uint8)
+        self.red_upper1 = np.array([10, 255, 255], dtype=np.uint8)
+        self.red_lower2 = np.array([160, 80, 60], dtype=np.uint8)
+        self.red_upper2 = np.array([179, 255, 255], dtype=np.uint8)
+
+        # Blue jersey (Everton)
+        self.blue_lower = np.array([95, 80, 60], dtype=np.uint8)
+        self.blue_upper = np.array([135, 255, 255], dtype=np.uint8)
+
+        # Referee yellow (to ignore)
+        self.yellow_lower = np.array([20, 70, 70], dtype=np.uint8)
+        self.yellow_upper = np.array([35, 255, 255], dtype=np.uint8)
+
+    def _crop_torso(self, frame, box: Tuple[float, float, float, float]):
+        """
+        Crop approximate torso region from the bounding box.
+        We ignore head/legs to avoid grass/shorts influence.
+        """
+        h_frame, w_frame = frame.shape[:2]
+        x1, y1, x2, y2 = map(int, box)
+
+        # Clamp to frame
+        x1 = max(0, min(x1, w_frame - 1))
+        x2 = max(0, min(x2, w_frame - 1))
+        y1 = max(0, min(y1, h_frame - 1))
+        y2 = max(0, min(y2, h_frame - 1))
+
+        if x2 <= x1 or y2 <= y1:
+            return None
+
+        h = y2 - y1
+        # Torso: from 25% to 75% of bbox height
+        top = y1 + int(0.25 * h)
+        bottom = y1 + int(0.75 * h)
+        top = max(y1, min(top, y2 - 1))
+        bottom = max(top + 1, min(bottom, y2))
+
+        torso = frame[top:bottom, x1:x2]
+        if torso.size == 0:
+            return None
+        return torso
+
+    def classify(self, frame, box: Tuple[float, float, float, float]) -> Optional[str]:
+        """
+        Classify a single player box into Team A, Team B, or None.
+
+        Returns:
+            "A"  -> red team
+            "B"  -> blue team
+            None -> referee / crowd / unknown
+        """
+        torso = self._crop_torso(frame, box)
+        if torso is None:
+            return None
+
+        hsv = cv2.cvtColor(torso, cv2.COLOR_BGR2HSV)
+
+        # Red mask (two ranges)
+        mask_red1 = cv2.inRange(hsv, self.red_lower1, self.red_upper1)
+        mask_red2 = cv2.inRange(hsv, self.red_lower2, self.red_upper2)
+        mask_red = cv2.bitwise_or(mask_red1, mask_red2)
+        red_count = int(cv2.countNonZero(mask_red))
+
+        # Blue mask
+        mask_blue = cv2.inRange(hsv, self.blue_lower, self.blue_upper)
+        blue_count = int(cv2.countNonZero(mask_blue))
+
+        # Yellow (referee) mask
+        mask_yellow = cv2.inRange(hsv, self.yellow_lower, self.yellow_upper)
+        yellow_count = int(cv2.countNonZero(mask_yellow))
+
+        # No strong color
+        if max(red_count, blue_count, yellow_count) < 20:
+            return None
+
+        # Ignore ref
+        if yellow_count == max(red_count, blue_count, yellow_count):
+            return None
+
+        # Decide team
+        if red_count > blue_count:
+            return "A"
+        elif blue_count > red_count:
+            return "B"
+        else:
+            return None
