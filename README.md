@@ -46,7 +46,7 @@ This phase serves as a **stable baseline** and reference point for future expans
 **Example:**  
 Manchester United & Real Madrid match analysis
 - This will be an addition to get a analysis video of any match being played against this 2 teams.  <ins>**STARTING PHASE OF INTEGRATING ML**</ins>
-Planned improvements:
+- Planned improvements:
 - Automated jersey color learning from reference images
 - Advanced goalkeeper identification
 - Improved ball interaction logic (passes, touches)
