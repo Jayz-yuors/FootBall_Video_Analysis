@@ -1,0 +1,29 @@
+# Core Computer Vision & Detection
+ultralytics>=8.0.0
+opencv-python>=4.8.0
+
+# Numerical & Scientific Computing
+numpy>=1.23
+scipy>=1.10
+matplotlib>=3.7
+
+# Progress & Logging
+tqdm>=4.65
+
+# Image Processing
+Pillow>=9.5.0
+
+# Data Handling & Analysis
+pandas>=1.5.0
+
+# Machine Learning & Scientific Computing
+scikit-image>=0.21.0
+scikit-learn>=1.3.0
+
+# Optional: For enhanced tracking (if you extend to DeepSORT)
+# torch>=2.0.0
+# torchvision>=0.15.0
+
+# Development & Testing (optional)
+# pytest>=7.4.0
+# black>=23.0.0
